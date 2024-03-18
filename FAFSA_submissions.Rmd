@@ -1,0 +1,147 @@
+---
+title: "FAFSA submissions"
+author: "Ian Hodgson"
+date: "2024-03-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(tidyverse)
+library(readxl)
+```
+
+``` {r clean data, include = F}
+
+# IMPORT DATA ----
+
+### Grade 12 enrollment
+gr12_2223 <- read_xlsx("data/FAFSA/2223MembBySchoolByGrade.xlsx",
+                       sheet = "School", 
+                       skip = 2,
+                       na = "*") %>% 
+  janitor::clean_names() %>% 
+  select(1:4, x12) %>% 
+  rename(students = x12) %>% 
+  filter(!is.na(students)) %>% 
+  mutate(class = "2023")
+
+gr12_2324 <- read_xlsx("data/FAFSA/2324MembBySchoolByGrade.xlsx",
+                       sheet = "School", 
+                       skip = 2,
+                       na = "*") %>% 
+  janitor::clean_names() %>% 
+  select(1:4, x12) %>% 
+  rename(students = x12) %>% 
+  filter(!is.na(students)) %>% 
+  mutate(class = "2024")
+
+gr12_enroll <- bind_rows(gr12_2223, 
+                         gr12_2324)
+
+## state to NCES code crosswalk 
+nces_xwalk <- read_xlsx("data/FAFSA/ncesdata_441DE4E0.xlsx",
+                       skip = 11,
+                       na = "†") %>% 
+  janitor::clean_names() %>% 
+  mutate(school_number = str_extract(state_school_id, "[0-9]{4}$") %>% 
+           as.numeric,
+         district_number = str_extract(state_district_id, "[0-9]{2}$") %>% 
+           as.numeric)
+
+## FAFSA submissions
+fafsa <- read_xls("data/FAFSA/FL-FAFSA submissions-2024-03-08.xls",
+                  sheet = "FL School Level Data",
+                  skip = 4, 
+                  col_names = F, 
+                  na = "<5")
+
+names(fafsa) <- c("school_code",
+                  "school_name", 
+                  "city", 
+                  "state", 
+                  "submitted_2024",
+                  "completed_2024",
+                  "submitted_2023",
+                  "completed_2023", 
+                  "submitted_2023_june", 
+                  "completed_2023_june",
+                  "submitted_2023_dec",
+                  "completed_2023_dec")
+
+# COMBINE DATA ----
+
+fafsa_subs <- fafsa %>% 
+  select(1:6) %>% 
+  rename(submitted = submitted_2024,
+         completed = completed_2024) %>% 
+  mutate(class = "2024") %>%
+  bind_rows(fafsa %>% 
+              select(1:4, 7:8) %>% 
+              rename(submitted = submitted_2023,
+                     completed = completed_2023) %>% 
+              mutate(class = "2023")) %>% 
+  mutate(submitted = as.numeric(submitted), 
+         completed = as.numeric(completed)) %>% 
+  group_by(school_code, school_name, state, class) %>% 
+  summarise(submitted = sum(submitted, na.rm = T),
+            completed = sum(completed, na.rm = T)) %>% 
+  ungroup() %>% 
+  left_join(nces_xwalk %>% 
+              select(school_code = nces_school_id,
+                     school_number, 
+                     district_number,
+                     type, 
+                     charter),
+            by = "school_code") %>% 
+  left_join(gr12_enroll, 
+            by = c("school_number", 
+                   "district_number", 
+                   "class")) %>% 
+  filter(!is.na(type),
+         charter == "No",
+         !is.na(students)) %>% 
+  mutate(submission_rate = submitted/students)
+
+```
+
+``` {r district submission rates, include = T}
+district <- fafsa_subs %>% 
+  group_by(class, district) %>% 
+  summarise(submitted = sum(submitted, na.rm = T),
+            students = sum(students)) %>% 
+  mutate(submit_share = submitted/students) %>% 
+  ungroup() %>% 
+  group_by(district) %>% 
+  arrange(district, class) %>% 
+  mutate(change = submit_share/submit_share[1]-1)
+
+state <- fafsa_subs %>% 
+  group_by(class) %>% 
+  summarise(submitted = sum(submitted, na.rm = T),
+            students = sum(students)) %>% 
+  mutate(submit_share = submitted/students)
+  
+
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
