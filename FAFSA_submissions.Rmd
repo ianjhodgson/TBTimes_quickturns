@@ -7,6 +7,7 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = F)
+rm(list = ls())
 library(tidyverse)
 library(readxl)
 ```
@@ -50,11 +51,18 @@ nces_xwalk <- read_xlsx("data/FAFSA/ncesdata_441DE4E0.xlsx",
            as.numeric)
 
 ## FAFSA submissions
-fafsa <- read_xls("data/FAFSA/FL-FAFSA submissions-2024-03-08.xls",
+fafsa <- read_xls("data/FAFSA/2024 reports/FL-FAFSA submissions-2024-03-08.xls",
                   sheet = "FL School Level Data",
                   skip = 4, 
                   col_names = F, 
-                  na = "<5")
+                  na = "<5") %>% 
+  mutate(date = ymd("2024-03-08")) %>% 
+  bind_rows(read_xls("data/FAFSA/2024 reports/FL-FAFSA submissions-2024-03-15.xls",
+                  sheet = "FL School Level Data",
+                  skip = 4, 
+                  col_names = F, 
+                  na = "<5") %>% 
+              mutate(date = ymd("2024-03-15")))
 
 names(fafsa) <- c("school_code",
                   "school_name", 
@@ -67,23 +75,24 @@ names(fafsa) <- c("school_code",
                   "submitted_2023_june", 
                   "completed_2023_june",
                   "submitted_2023_dec",
-                  "completed_2023_dec")
+                  "completed_2023_dec",
+                  "date")
 
 # COMBINE DATA ----
 
 fafsa_subs <- fafsa %>% 
-  select(1:6) %>% 
+  select(1:6,13) %>% 
   rename(submitted = submitted_2024,
          completed = completed_2024) %>% 
   mutate(class = "2024") %>%
   bind_rows(fafsa %>% 
-              select(1:4, 7:8) %>% 
+              select(1:4, 7:8, 13) %>% 
               rename(submitted = submitted_2023,
                      completed = completed_2023) %>% 
               mutate(class = "2023")) %>% 
   mutate(submitted = as.numeric(submitted), 
          completed = as.numeric(completed)) %>% 
-  group_by(school_code, school_name, state, class) %>% 
+  group_by(school_code, school_name, state, class, date) %>% 
   summarise(submitted = sum(submitted, na.rm = T),
             completed = sum(completed, na.rm = T)) %>% 
   ungroup() %>% 
@@ -107,6 +116,7 @@ fafsa_subs <- fafsa %>%
 
 ``` {r district submission rates, include = T}
 district <- fafsa_subs %>% 
+  filter(date == max(date)) %>% 
   group_by(class, district) %>% 
   summarise(submitted = sum(submitted, na.rm = T),
             students = sum(students)) %>% 
@@ -114,34 +124,199 @@ district <- fafsa_subs %>%
   ungroup() %>% 
   group_by(district) %>% 
   arrange(district, class) %>% 
-  mutate(change = submit_share/submit_share[1]-1)
+  mutate(change = (submit_share/submit_share[1])-1)
+
+district %>% filter(class == "2024")
 
 state <- fafsa_subs %>% 
   group_by(class) %>% 
   summarise(submitted = sum(submitted, na.rm = T),
             students = sum(students)) %>% 
-  mutate(submit_share = submitted/students)
+  mutate(submit_share = submitted/students) %>% 
+  mutate(change = (submit_share/submit_share[1])-1)
+
+state
+  
+
+```
+
+### Completion rates over time
+
+``` {r clean archive data, include = F}
+## Cycle 2024-25
+cycle_2425 <- read_xlsx("data/FAFSA/archived reports/HSARCHIVE_combined.xlsx",
+                        sheet = "cycle 2425", 
+                        na = "<5") %>% 
+  janitor::clean_names() %>% 
+  pivot_longer(cols = 5:6, 
+               values_to = "submitted",
+               names_to = "date") %>% 
+  mutate(class = "2024",
+         month = mdy(date) %>% month(),
+         date = date %>% mdy()) %>% 
+    filter(state == "FL") %>% 
+  filter(!is.na(submitted))
+
+## Cycle 2023-24
+cycle_2324 <- read_xlsx("data/FAFSA/archived reports/HSARCHIVE_combined.xlsx",
+                        sheet = "cycle 2324", 
+                        na = "<5") %>% 
+  janitor::clean_names() %>% 
+  pivot_longer(cols = 5:12, 
+               values_to = "submitted",
+               names_to = "date") %>% 
+  mutate(class = "2023",
+         month = date %>% mdy() %>% month(),
+         date = date %>% mdy) %>% 
+    filter(state == "FL") %>% 
+  filter(!is.na(submitted))
+
+temp <- cycle_2324 %>% 
+  bind_rows(cycle_2425) %>% 
+  left_join(fafsa_subs %>% distinct(school_code, class, students, district),
+            by = c("school_code", "class")) %>% 
+  mutate(submission_rate = as.numeric(submitted)/students,
+         submitted = as.numeric(submitted)) %>% 
+  rename(school_name = name) %>% 
+  bind_rows(fafsa_subs %>% 
+              mutate(date = ifelse(class == "2023", 
+                                   date - years(1),
+                                   date) %>% 
+                       as.Date())) %>%
+  select(school_code, school_name, date, submitted, class, month, students,
+         submission_rate, district, date) %>% 
+  arrange(school_name, date)
+
+temp_dist <- temp %>% 
+  group_by(class, month, district, date) %>% 
+  filter(!is.na(students)) %>% 
+  summarise(submitted = sum(submitted, na.rm = T),
+            students = sum(students, na.rm = T)) %>% 
+  mutate(submission_rate = submitted/students,
+         date_adj = ifelse(class == "2023",
+                           date, 
+                           date - years(1)) %>% 
+           as.Date(),
+         date_adj = ifelse(is.na(date_adj),
+                           ymd("2023-02-28"),
+                           date_adj)) %>% 
+  ungroup()
+
+df_out_district <- temp_dist %>% 
+  filter(class == "2023") %>% 
+  select(district, date_adj,
+         submitted_2023 = submitted, 
+         students_2023 = students, 
+         submission_rate_2023 = submission_rate) %>% 
+  left_join(temp_dist %>% 
+              filter(class == "2024") %>% 
+              select(district, date_adj,
+                     submitted_2024 = submitted, 
+                     students_2024 = students, 
+                     submission_rate_2024 = submission_rate),
+            by = c("district", "date_adj")) %>% 
+  mutate(date_adj = date_adj %>% as.Date) %>% 
+  arrange(date_adj, district)
+
+df_out_state <- df_out_district %>% 
+  group_by(date_adj) %>% 
+  select(date_adj, 
+         starts_with("students"), 
+         starts_with("submitted")) %>% 
+  summarise_all(.funs = function(x){sum(x, na.rm = T)}) %>% 
+  mutate(submission_rate_2023 = submitted_2023/students_2023, 
+         submission_rate_2024 = submitted_2024/students_2024) %>% 
+  write_csv("data/FAFSA/output/submission_rate_state.csv", na = "")
+
+df_out_district %>% 
+  bind_rows(tibble(district = unique(df_out_district$district), 
+                   date_adj =  rep(ymd("2022-09-30"), 70), 
+                   submission_rate_2023 = rep(0, 70))) %>% 
+  mutate(submission_rate_2024 = ifelse(date_adj == ymd("2022-12-31"),
+                                       0,
+                                       submission_rate_2024)) %>% 
+  filter(district %in% c("HILLSBOROUGH", 
+                         "PINELLAS",
+                         "PASCO")) %>% 
+  ggplot() + 
+  geom_line(aes(x = date_adj, 
+                y = submission_rate_2023, 
+                title = "2023"), 
+            col = "red") + 
+  geom_line(aes(x = date_adj, 
+                y = submission_rate_2024, 
+                title = "2024"),
+            col = "blue") + 
+  theme_minimal() +
+  facet_wrap(facets = "district", 
+             ncol = 2)
   
 
 ```
 
 
-## R Markdown
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+### Submission rates by district, broken down by poverty and race
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+``` {r pov and race, include = F}
+lunch_status <- read_xlsx("data/FAFSA/2324FS2-Lunch-Status-School.xlsx",
+                          sheet = 1, skip = 2, na = "*") %>% 
+  janitor::clean_names() %>% 
+  group_by(district) %>% 
+  mutate(dist_ave_rate = mean(rate_wo_multiplier),
+         rate_g_ave = rate_wo_multiplier > dist_ave_rate,
+         rate_g_X = rate_wo_multiplier >= .5,
+         pov_quartile = case_when(
+           rate_wo_multiplier <= .3463 ~ "bottom",
+           rate_wo_multiplier >= .5848 ~ "top",
+           !is.na(rate_wo_multiplier) ~ "middle",
+           T ~ "ERROR")) %>% 
+  mutate(district_number = as.numeric(dist_number),
+         school_number = as.numeric(schl_number)) %>% 
+    select(district_number, school_number, school_name, 
+           lunch_rate_wo_multiplier = rate_wo_multiplier, 
+           lunch_rate_g_ave = rate_g_ave, 
+           lunch_rate_g_X = rate_g_X,
+           lunch_quartile = pov_quartile)
 
-```{r cars}
-summary(cars)
+subs_dis_pov <- fafsa_subs %>% 
+  filter(class == "2024",
+         !is.na(submission_rate)) %>% 
+  left_join(lunch_status) 
+
+subs_dis_pov %>% 
+  ungroup() %>% 
+  group_by(lunch_quartile) %>% 
+  summarise(submission_rate = mean(submission_rate),
+            count = n())
+
 ```
 
-## Including Plots
+There appears to be a strong relationship between family income and FAFSA submission rates. The schools with the highest share of low-income students (top quartile, share >= 58.5%) had 38% lower submission rate than the most afflent schools (bottom quartile, share <= 34.6%)
 
-You can also embed plots, for example:
+``` {r poverty regression, include = T}
+subs_dis_pov %>% 
+  # filter(district %in% c("HILLSBOROUGH",
+  #                        "PINELLAS",
+  #                        "PASCO")) %>% 
+  ggplot() + 
+  geom_point(aes(x = lunch_rate_wo_multiplier, 
+                 y = submission_rate, size = students), 
+             alpha = .2) + 
+  geom_smooth(aes(x = lunch_rate_wo_multiplier, 
+                 y = submission_rate),
+              method = "lm", 
+              formula = y~x) + 
+  theme_minimal()
+```            
+``` {r submissions by rate, include = F}
+school_race <- read_xlsx("data/FAFSA/2324MembBySchoolByGradeByRace.xlsx",
+                          sheet = 3, skip = 2, na = "*") %>% 
+  janitor::clean_names() %>% 
+  filter(grade == "12")
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+subs_sch_race <- left_join(fafsa_subs %>% filter(class == "2024"),
+                           school_race) %>% 
+  filter(!is.na())
+
 ```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
