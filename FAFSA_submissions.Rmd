@@ -10,6 +10,7 @@ knitr::opts_chunk$set(echo = F)
 rm(list = ls())
 library(tidyverse)
 library(readxl)
+library(gt)
 ```
 
 ``` {r clean data, include = F}
@@ -62,7 +63,13 @@ fafsa <- read_xls("data/FAFSA/2024 reports/FL-FAFSA submissions-2024-03-08.xls",
                   skip = 4, 
                   col_names = F, 
                   na = "<5") %>% 
-              mutate(date = ymd("2024-03-15")))
+              mutate(date = ymd("2024-03-15"))) %>% 
+  bind_rows(read_xls("data/FAFSA/2024 reports/FL-FAFSA submissions-2024-03-22.xls",
+                  sheet = "FL School Level Data",
+                  skip = 4, 
+                  col_names = F, 
+                  na = "<5") %>% 
+              mutate(date = ymd("2024-03-22")))
 
 names(fafsa) <- c("school_code",
                   "school_name", 
@@ -126,7 +133,12 @@ district <- fafsa_subs %>%
   arrange(district, class) %>% 
   mutate(change = (submit_share/submit_share[1])-1)
 
-district %>% filter(class == "2024")
+district %>% filter(class == "2024") %>% 
+  select(-class) %>% 
+  ungroup() %>% 
+  gt() %>% 
+  fmt_percent(4:5, decimals = 1) %>% 
+  opt_interactive()
 
 state <- fafsa_subs %>% 
   group_by(class) %>% 
@@ -255,40 +267,77 @@ df_out_district %>%
 ```
 
 
-
 ### Submission rates by district, broken down by poverty and race
 
 ``` {r pov and race, include = F}
 lunch_status <- read_xlsx("data/FAFSA/2324FS2-Lunch-Status-School.xlsx",
                           sheet = 1, skip = 2, na = "*") %>% 
   janitor::clean_names() %>% 
+  mutate(district_number = as.numeric(dist_number),
+         school_number = as.numeric(schl_number)) %>% 
+  select(-school_name)
+
+subs_dis_pov <- fafsa_subs %>%
+  filter(!is.na(submission_rate)) %>%
+  left_join(lunch_status) %>% 
+  filter(date == max(fafsa_subs$date))
+
+frl_rate_quantiles <- quantile(subs_dis_pov$rate_wo_multiplier[which(subs_dis_pov$class == "2024")], seq(.1,1,.1), na.rm = T)
+
+lunch_status_qtl <- subs_dis_pov %>% 
   group_by(district) %>% 
   mutate(dist_ave_rate = mean(rate_wo_multiplier),
          rate_g_ave = rate_wo_multiplier > dist_ave_rate,
          rate_g_X = rate_wo_multiplier >= .5,
-         pov_quartile = case_when(
-           rate_wo_multiplier <= .3463 ~ "bottom",
-           rate_wo_multiplier >= .5848 ~ "top",
-           !is.na(rate_wo_multiplier) ~ "middle",
-           T ~ "ERROR")) %>% 
+         pov_quantile = case_when(
+           rate_wo_multiplier <= frl_rate_quantiles[1] ~ "10th", 
+           rate_wo_multiplier <= frl_rate_quantiles[2] ~ "9th",
+           rate_wo_multiplier <= frl_rate_quantiles[3] ~ "8th", 
+           rate_wo_multiplier <= frl_rate_quantiles[4] ~ "7th", 
+           rate_wo_multiplier <= frl_rate_quantiles[5] ~ "6th", 
+           rate_wo_multiplier <= frl_rate_quantiles[6] ~ "5th", 
+           rate_wo_multiplier <= frl_rate_quantiles[7] ~ "4th", 
+           rate_wo_multiplier <= frl_rate_quantiles[8] ~ "3rd", 
+           rate_wo_multiplier <= frl_rate_quantiles[9] ~ "2nd", 
+           rate_wo_multiplier <= frl_rate_quantiles[10] ~ "1st", 
+           T ~ NA)) %>% 
   mutate(district_number = as.numeric(dist_number),
          school_number = as.numeric(schl_number)) %>% 
     select(district_number, school_number, school_name, 
            lunch_rate_wo_multiplier = rate_wo_multiplier, 
            lunch_rate_g_ave = rate_g_ave, 
            lunch_rate_g_X = rate_g_X,
-           lunch_quartile = pov_quartile)
+           lunch_quantile = pov_quantile, 
+           students_lunch = number_of_students_denominator, 
+           submission_rate,
+           class,
+           district, 
+           students_gr12 = students)
 
-subs_dis_pov <- fafsa_subs %>% 
-  filter(class == "2024",
-         !is.na(submission_rate)) %>% 
-  left_join(lunch_status) 
+lunch_status_qtl %>% 
+  group_by(lunch_quantile, class) %>% 
+  filter(!is.na(lunch_quantile)) %>% 
+  summarise(count = n(), 
+            min = min(lunch_rate_wo_multiplier, na.rm = T),
+            max = max(lunch_rate_wo_multiplier, na.rm = T),
+            mean = mean(lunch_rate_wo_multiplier, na.rm = T))
 
-subs_dis_pov %>% 
+# subs_dis_pov <- fafsa_subs %>% 
+#   filter(class == "2024",
+#          !is.na(submission_rate)) %>% 
+#   left_join(lunch_status) 
+
+
+
+lunch_status_qtl %>% 
   ungroup() %>% 
-  group_by(lunch_quartile) %>% 
-  summarise(submission_rate = mean(submission_rate),
-            count = n())
+  group_by(lunch_quantile, class) %>% 
+  summarise(submission_rate = weighted.mean(submission_rate, students_gr12),
+            count = n()) %>% 
+  arrange(class) %>% 
+  filter(!is.na(lunch_quantile)) %>% 
+  arrange(class) %>% 
+  write_csv("data/FAFSA/output/lunch_status_quantile.csv", na = "")
 
 ```
 
@@ -315,8 +364,15 @@ school_race <- read_xlsx("data/FAFSA/2324MembBySchoolByGradeByRace.xlsx",
   janitor::clean_names() %>% 
   filter(grade == "12")
 
-subs_sch_race <- left_join(fafsa_subs %>% filter(class == "2024"),
-                           school_race) %>% 
-  filter(!is.na())
+subs_sch_race <- lunch_status_qtl %>% 
+  left_join(school_race) %>% 
+  mutate(share_hisp = hispanic_latino/students_gr12, 
+         maj_hisp = class == "2024" & share_hisp > .67) %>% 
+  group_by(school_number, district_number) %>%
+  mutate(maj_hisp_keep = max(maj_hisp)) %>% 
+  group_by(maj_hisp_keep, class) %>% 
+  summarise(submission_rate = weighted.mean(submission_rate, students_gr12), 
+            county = n())
+  
 
 ```
